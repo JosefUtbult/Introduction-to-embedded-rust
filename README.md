@@ -23,6 +23,11 @@ När rustup installeras kommer också en kompilator för rust att hänga med, ka
 sudo pacman -S rustup
 ```
 
+Vi vill också specificera vilken version av kompilatorn och verktyg som ska användas. Vi vill ha en stabil version som standard, så du kan köra följande för att rustup ska installera och sätta up det
+```bash
+rustup default stable
+```
+
 ## Introduktion till rust
 Här kommer en introduktion till rust. Om du känner att du har koll kan du skippa den. Annars om du känner dig relativt säker men vill ha en genomgång om ägandeskap kan du kolla [Exempel 8 - Ägandeskap](#exempel-8-agandeskap) och [Exempel 9 - Lånande](#exempel-9-lanande).
 
@@ -638,7 +643,7 @@ Gå till menyn "Run and Debug"
 
 Där kan du välja alternativet `create a launch.json file`
 
-![](img/EmbeddedRust/Rust 2022-12-15 20.47.29.excalidraw}
+![](img/EmbeddedRust/VSCodeCreateLaunch.png)
 
 Det kommer ge dig ett fönster där det står att du har en `Cargo.toml` fil i ditt projekt, och det frågar om du vill generera en fil från den. Välj `Yes`.
 
@@ -650,11 +655,13 @@ Det autogenererade ska funka för vårt exempel. Testa att bygga och köra proje
 
 Den kommer att bygga och köra ditt program. Du kan se hur saker händer nere i terminalen. Väljer du fliken `Terminal` bör du också se att programmet printade "Hello, world!"
 
-Nu kan du testa att debugga ditt program. Om du klickar bredvid din kod, till vänster om ett radnummer i din mainfunktion. Då får du upp en liten röd cirkel.
+### Köra debuggern
+
+Nu kan du testa att debugga ditt program. Om du klickar bredvid din kod, till vänster om ett radnummer i din mainfunktion. Då får du upp en liten röd cirkel. Det är ett _debug sign_ som specificerar att debuggern ska stanna programmet när den kommer till den raden.
 
 ![](img/EmbeddedRust/VSCodeDebugSign.png)
 
-Om du nu kör `RUN AND DEBUG` kommer ditt program att starta, men det pausar ditt program och sätter det i debuggläge.
+Om du nu kör `RUN AND DEBUG` (`F5`) kommer ditt program att starta, men det pausar ditt program och sätter det i debuggläge. Sedan kommer programmet köras tills den kommer till rad 2 och stanna där du laggt till 
 
 Du kan läsa på mer om hur debugging funkar på [VS Codes sida](https://code.visualstudio.com/Docs/editor/debugging).
 
@@ -682,6 +689,7 @@ cd embedded_test
 Sedan vill vi installera toolchainen som krävs för ARM processorn
 ```bash
 rustup target install thumbv7m-none-eabi
+rustup target add thumbv7em-none-eabi
 ```
 
 För att sedan skriva till devboardens minne gör du det som heter att _flasha_ minnet. Du kan installera en cargo modul just för att göra detta.
@@ -731,6 +739,7 @@ MEMORY
 Nu behöver du ändra i filen `Cargo.toml` för att specificera hur programmet ska byggas. Öppna den och lägg till efter `[dependencies]`
 ```toml
 [package]
+authors = ["Per Lindgren <per.lindgren@ltu.se>", "Josef Utbult <josef@utbult.design>"]
 name = "embedded_test"
 version = "0.1.0"
 edition = "2021"
@@ -755,13 +764,31 @@ nrf52840-hal = { version = "0.16.0", features = ["rt"] }
 # Panic handling för när din kod kraschar
 panic-rtt-target = { version = "0.1.2", features = ["cortex-m"] } 
 
+# Monotonic timers
+systick-monotonic = "1.0.0"
+dwt-systick-monotonic = "1.0.0"
+
+# Specifikationer om hur programmet ska kompileras för debug mode
+[profile.dev]
+incremental = false
+codegen-units = 1
+lto = true
+# overflow-checks = false # uncomment to disable overflow checks for dev/debug builds  
+
 # Specifikationer om hur programmet ska kompileras för release mode
 [profile.release]
-# Maximera optimering för storlek, då vi inte längre har så mycket minne
-opt-level = 'z'
-
+incremental = false
+# Bättre optimering
+codegen-units = 1
+# Vi vill ha debugsymboler då vi inte ska släppa något som en closed source produkt. 
+# Skulle fallet vara att du vill skriva kod closed source kan du kommentera ut "debug = true"
+debug = true
 # Link-time-optimizations som kommer hjälpa mer med optimering
 lto = true
+# Vi lägger till lite checkar för overflows. Du kan kommentera ut det om du har riktigt dåligt med minne
+overflow-checks = true 
+# Maximera optimering för storlek, då vi inte längre har så mycket minne
+opt-level = 'z'
 ```
 
 ### Embedded kod
@@ -846,7 +873,16 @@ yay nrf5x-command-line-tools
 ```
 
 #### NRF tools installation - Manjaro med AUR
+Börja med att installera `jlink-software-and-documentation`, vilket är en dependency för `nrf5x-command-line-tools`
+
+```bash
+git clone https://aur.archlinux.org/jlink-software-and-documentation.git
+cd jlink-software-and-documentation/
+makepkg -si
 ```
+
+Sedan installera `nrf5x-command-line-tools`
+```bash
 git clone https://aur.archlinux.org/nrf5x-command-line-tools.git
 cd nrf5x-command-line-tools
 makepkg -si
@@ -1130,3 +1166,487 @@ VSCode, för att kunna integrera med GDB därifrån. Det kommer att vara lite en
 men jag menar att det kan vara värt gå igenom hur hur GDB själv funkar för att få
 en klarare bild över vad som sker i varje steg.
 
+### Debugga i VSCode med OpenOCD
+Nu ska vi testa att koppla ihop OpenOCD och VSCode för att få en bra interface för 
+att debugga din kod. Istället för att använda GDB kommer istället VSCode skapa och 
+koppla till OpenOCD instansen. 
+
+För att detta ska funka behöver du följande paket för VSCode.
+
+- Cortex-Debug
+- [Rust-analyzer](#rust-plugin)
+
+Rust-analyzer hittar du instruktioner för [tidigare](#rust-plugin). Du kan installera paketet Cortex-Debug på samma sätt.
+
+#### Launch.json
+Tidigare har du ett exempel för att [skapa en launch.json fil för VSCode](#kompilera-och-debugga-i-vs-code). Nu behöver vi skapa en launch.json som är konfigurerad för OpenOCD.
+
+Gå till menyn "Run and Debug"
+
+![](img/EmbeddedRust/VSCodeRun.png)
+
+Där kan du välja alternativet `create a launch.json file`
+
+![](img/EmbeddedRust/VSCodeCreateLaunch.png)
+
+Den kommer fråga vilken debugger du vill använda. Välj `Cortex-Debug`.
+
+Den skapar och öppnar nu filen `.vscode/launch.json`. Den bör se ut såhär.
+```json
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Cortex Debug",
+            "cwd": "${workspaceFolder}",
+            "executable": "./bin/executable.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "runToEntryPoint": "main",
+            "servertype": "jlink"
+        }
+    ]
+}
+```
+
+Snyggt. Vi har dock en annan debugger än de använder i templaten. Vi vill använda 
+OpenOCD istället för JLink.
+
+Ta bort den gammla konfigurationen och lägg till följande.
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (OpenOCD)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "preLaunchTask": "Cargo build",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceFolder}/target/thumbv7em-none-eabi/debug/${workspaceFolderBasename}",
+            "servertype": "openocd",
+            "device": "nrf52",
+            "configFiles": ["debug_openocd.cfg"],
+            "svdFile": "${workspaceFolder}/nrf52840.svd",
+            "runToEntryPoint": "main",
+        } 
+    ]
+}
+```
+
+Notera att vi specificerar att konfigurationen är för typen `cortex-debug`, vilket 
+säger till VSCode att den ska använda Cortex-Debug pluginet för att debugga.
+
+Den här konfigurationen kommer försöka programmera ditt devboard med filen `/target/thumbv7em-none-eabi/debug/gdb_test`, men **den kommer inte kompilera programmet av 
+sig själv**. För att VSCode ska kompilera koden innan den startar upp OpenOCD kan vi
+definera ett `preLaunchTask`, vilket är ett task som kommer utföras innan debug 
+processen.
+
+Tasks i VSCode definieras i en egen fil, som heter `.vscode/tasks.json`. Du kan skapa den igenom att välja `Terminal > Configure Tasks`.
+
+![](img/EmbeddedRust/VSCodeConfigureTasks.png)
+
+Sedan väljer du `Create tasks.json from template`.
+
+![](img/EmbeddedRust/VSCodeCreateTask.png)
+
+Sedan kan du välja `Others` i nästa meny.
+
+![](img/EmbeddedRust/VSCodeOtherTask.png)
+
+Den bör se ut såhär.
+```json
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "echo",
+            "type": "shell",
+            "command": "echo Hello"
+        }
+    ]
+}
+```
+
+Vi vill lägga till ett _Build task_ för att köra `cargo build`. Byt ut allt i filen 
+till det här.
+```json
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cargo build",
+            "command": "cargo",
+            "args": [
+                "build"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build",
+        },
+        {
+            "label": "nrfjprog recover",
+            "command": "nrfjprog",
+            "args": [
+                "--recover"
+            ],
+            "group": "build"
+        }
+    ]
+}
+```
+
+Här har vi två tasks som kan köras i VSCode. Det första är ett task som heter 
+`cargo build` och det kommer att köra `cargo build` i terminalen. Det andra
+är ett task som heter `nrfjprog recover`, och det kommer att köra 
+`nrfjprog --recover` i terminalen. `cargo build` har du konfigurerat att det ska
+köras varje gång du vill debugga, men du kan också köra `nrfjprog recover` manuellt 
+i VSCode för att låsa upp ditt devboard i VSCode.
+
+### Köra debuggen
+
+Nu är det dags att programmera utvecklingskortet.
+
+Först behöver du låsa upp ditt devboard. Det har vi tidigare gjort igenom att manuellt
+kalla på `nrfjprog`, men nu la du just till ett build task i VSCode för att göra det automatiskt. Du kan kalla på ett build task igenom att gå till `Terminal > Run Build Task` eller med kommandot `CTRL + SHIFT + B`.
+
+Då får du upp alla tillgänliga build tasks från `tasks.json`. Väljer du 
+`nrfjprog recover` kommer `nrfjprog` kommandot köras i VSCodes terminal.
+
+![](img/EmbeddedRust/VSCodeNrfjprogRecover.png)
+
+Nu kan du lägga till breakpoints i din kod, på samma sätt som du gjort [tidigare](#köra-debuggern). Du kan markera att debuggern ska stanna på rad 19 vid din printsats.
+
+![](img/EmbeddedRust/VSCodeDebugSignEmbedded.png)
+
+Om du nu kör `RUN AND DEBUG` (`F5`) kommer ditt program att starta, men det pausar ditt program och sätter det i debuggläge. Sedan kommer programmet köras och stanna på den första raden av din kod.
+
+![](img/EmbeddedRust/VSCodeDebuggingEmbeddedStart.png)
+
+Längst upp i mitten finns en liten meny för att kontrollera debuggern. Du kan fortsätta
+körningen av programmet på [samma sätt som i GDB](#första-testet) igenom att trycka på Continue knappen.
+
+![](img/EmbeddedRust/VSCodeDebugContinue.png)
+
+Om du fortsätter programmet kommer den sedan stanna vid din printsats.
+
+![](img/EmbeddedRust/VSCodeDebuggingEmbeddedPrint.png)
+
+Snyggt. Nu kan vi veta att ett program kommer till en rad kod iallafall, men vi kan faktiskt också se vad olika variabler har för värden.
+
+Stanna debuggingen igenom att trycka på stop uppe i menyn.
+
+![](img/EmbeddedRust/VSCodeDebugStop.png)
+
+Sedan kan du redigera mainfunktionen. Istället för vad som står där kan du lägga till följande.
+```rust
+#[cortex_m_rt::entry]
+fn main() -> ! {
+	// Initialisera printing
+	rtt_init_print!();
+    // Testa att skapa en variabel och ändra värde på den.
+	let mut test_var = 12;
+	test_var += 1;
+	// Notera att vi använder macrot rprintln och inte println
+	rprintln!("Hello, World!");
+	exit();
+}
+```
+
+Testa nu att lägga till så du har två breakpoints. Ett på rad 19 vid `test_var += 1;`
+och ett på rad 21 vid `rprintln`. Testa sedan att köra debuggern. Tryck på Continue när den stannar på första raden. Den bör då stanna på rad 19.
+
+![](img/EmbeddedRust/VSCodeDebugSignEmbeddedv2.png)
+
+Längst upp till vänster kan du se en dropdown meny som heter `Local`. Under den kan du
+se att det där nu finns en variabel kallad `test_var`. Debuggern har efter att den 
+stannat hämtat värdet på variabeln från utvecklingskortet och visar den nu. Anledningen
+till att den är 12 och inte 13 är för att debuggern alltid stannar **före** den
+kör vad som står på raden.
+
+Testa att trycka Continue igen. Nu bör debuggern stanna på rad 21, och efterssom den
+kört rad 19 är nu `test_var` 13.
+
+Nu har du lyckats debugga! Djupare än såhär kommer vi inte gå för debugging. Är du
+mer intresserad kan du kolla på [VS Codes sida](https://code.visualstudio.com/Docs/editor/debugging) eller [Cortex-Debug wiki](https://github.com/Marus/cortex-debug/wiki).
+
+## Debugga i embedded rust med Probe-rs (utdaterad)
+
+Att kunna printa saker räcker ofta för att testa enkla saker i ett program, men ibland kan det krävas lite mer kontroll över hur en embeddedplattform körs. I de fallen vill man
+ha en debugger för att kunna stoppa körningen av kod och kolla på alla variabler. Problemet med det sätt vi satt upp exempelprojektet nu är att `probe-run` inte har den 
+funktionaliteten. I det här exemplet kommer vi därför sätta upp en `probe-rs` instans, vilket är en debugger som körs på din dator och komunicerar med embeddedenheten.
+
+### Probe-rs setup (linux)
+[Probe-rs - Getting started](https://probe.rs/docs/getting-started/probe-setup/)
+
+För att kunna använda probe-rs, behöver vi en _udev rule_. Detta är en fil som specificerar vad din dator får göra med en extern enhet. Du kan ladda ner filen [här](https://probe.rs/files/69-probe-rs.rules). När du laddat ner den behöver du flytta den till `/etc/udev/rules.d`
+
+```bash
+sudo cp 69-probe-rs.rules /etc/udev/rules.d
+```
+
+Sedan kan du ladda om alla regler och se till att den nya filen har applicerats.
+```bash
+sudo udevadm control --reload
+sudo udevadm trigger
+```
+
+### Installera probe-rs VSCode extension
+[Probe-rs - VSCode](https://probe.rs/docs/tools/vscode/)
+
+Probe-rs har ett VSCode extension som vi ska använda för att debugga vår kod. Detta extension finns tyvärr inte i VSCodes extensions, utan det behöver installeras manuellt. Men det är inte så svårt.
+
+Börja med att gå till [Probe-rs github sida](https://github.com/probe-rs/vscode/releases) och ladda ner den senaste releasen för pluginet igenom att välja menyn `Assets` och ladda ner `probe-rs-debugger-x.x.x.vsix`.
+
+![](img/EmbeddedRust/Probers-VSCode-Download1.png)
+![](img/EmbeddedRust/Probers-VSCode-Download2.png)
+
+Öppna sedan en terminal, gå till där du laddade ner filen och kör följande för att installera extensionet.
+```shell
+code --install-extension probe-rs-debugger-*.*.*.vsix
+```
+
+Nu när du startar VSCode kan du gå till Extensionsfliken och se så att `Debugger for probe-rs` är installerat.
+
+### Installera probe-rs cargo modul
+Jag hade lite problem med detta då debug servern inte lyckades installeras, men min lösning var att först installera `pkg-config`
+
+```shell
+sudo pacman -S pkgconf
+```
+
+Sedan installera cargo modulen
+```shell
+cargo install probe-rs-debugger
+```
+
+### Debugga med probe-rs VSCode extension
+Nu ska vi testa att köra kod på experimentkortet och koppla det till probe-rs för att 
+debugga. Öppna projektet `embedded_test` i VSCode, gå till fliken `Run and Debug` och välj `create a launch.json file`.
+![](img/EmbeddedRust/VSCodeRun.png)
+![](img/EmbeddedRust/VSCodeCreateLaunch.png)
+
+Med probe-rs extensionet kommer du nu få alternativet att debugga med en probe-rs adapter.
+![](img/EmbeddedRust/Probers-VSCode-CreateLaunch.png)
+
+Väljer du det alternativet skapas en launch fil som ser ut såhär.
+```json
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe-rs Test",
+            "cwd": "${workspaceFolder}",
+            "connectUnderReset": true,
+            "chip": "STM32H745ZITx",
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "resetAfterFlashing": true,
+                "haltAfterReset": true
+            },
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "programBinary": "./target/thumbv7em-none-eabihf/debug/${workspaceFolderBasename}"
+                }
+            ]
+        }
+    ]
+}
+```
+
+Vi kommer dock vilja göra om nästan allt det här för att få rätt processor och för 
+att starta debugservern från VSCode. Kopiera det här och byt ut allt i filen.
+```json
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe-rs Debug",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build --example",
+            "connectUnderReset": false,
+            "chip": "nRF52840_xxAA",
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "resetAfterFlashing": true,
+                "haltAfterReset": false,
+            },
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "programBinary": "./target/thumbv7em-none-eabihf/debug/examples/${fileBasenameNoExtension}",
+
+                    "rttEnabled": true,
+                    "rttChannelFormats": [
+                        {
+                            "channelNumber": 0,
+                            "dataFormat": "String", // Format RTT data as String data
+                            "showTimestamps": false // Include host-side timestamps for every line of data transferred from the target RTT output
+                        },
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe-rs Release",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build --example --release",
+            "connectUnderReset": false,
+            "chip": "nRF52840_xxAA",
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "resetAfterFlashing": true,
+                "haltAfterReset": false
+            },
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "programBinary": "./target/thumbv7em-none-eabihf/release/examples/${fileBasenameNoExtension}",
+
+                    "rttEnabled": true,
+                    "rttChannelFormats": [
+                        {
+                            "channelNumber": 0,
+                            "dataFormat": "String", // Format RTT data as String data
+                            "showTimestamps": false // Include host-side timestamps for every line of data transferred from the target RTT output
+                        },
+                    ]
+                }
+            ]
+        }
+    ]
+}
+```
+
+Vi kommer också behöva en till fil i mappen `.vscode` för att definera lite tasks som
+`launch.json` behöver kalla på. Skapa filen `.vscode/tasks.json` och lägg till.
+```json
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558 
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+			// Task som körs manuellt för att tillåta programmering av NRF processorn
+            "label": "nrfjprog recover",
+            "command": "nrfjprog",
+            "args": [
+                "--recover"
+            ],
+            "group": "build"
+        }
+        ,{
+            "label": "cargo build",
+            "command": "cargo",
+            "args": [
+                "build",
+                // "${fileBasenameNoExtension}"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build",
+        },
+        {
+            "label": "cargo build --release",
+            "command": "cargo",
+            "args": [
+                "build",
+                // "${fileBasenameNoExtension}",
+                "--release"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": "build",
+        },
+    ]
+}
+```
+
+Nice. Nu kommer VSCode kalla på cargo för vårt projekt, vilket kommer använda 
+`Cargo.toml` filen som vi skapat tidigare.
+
+Först behöver du låsa upp ditt devboard. Det har vi tidigare gjort igenom att manuellt
+kalla på `nrfjprog`, men nu la du just till ett build task i VSCode för att göra det automatiskt. Du kan kalla på ett build task igenom att gå till `Terminal > Run Build Task` eller med kommandot `CTRL + SHIFT + B`.
+
+Då får du upp alla tillgänliga build tasks från `tasks.json`. Väljer du 
+`nrfjprog recover` kommer `nrfjprog` kommandot köras i VSCodes terminal.
+
+
+## Rust embedded
+
+Nu har vi kommit till ett stadie där vi faktiskt kan börja testa att skriva kod som är
+specifik för ett embeddedsytem. Den stora skillnaden mellan program på ett inbyggt
+system och ett program som körs på din dator är att embeddedenheten kommer behöva 
+komunicera med externa komponenter (periferals). Exempel på externa komponenter kan 
+vara en knapp eller en LED lampa. 
+
+Dessa exempel ska vi använda nu. Du behöver följande.
+
+- Ditt utvecklingskort
+- En LED lampa
+- En knapp
+- En resistor
+- Ett kopplingsdäck
+- Kopplingskablar
+
+TODO: Lägg till bild
+
+Jag har valt en 220 ohms resistor, men det går bra med allt mellan 100-1000 ohm.
+
+
+Här är kretsen du ska koppla.
+
+![](img/EmbeddedRust/NRFButtonLed.png)
+
+Det bör se ut något såhär.
+
+![](img/EmbeddedRust/NRFPatchboard.jpg)
+
+### Skapa ett projekt
+
+Du kan skapa ett nytt projekt som heter `button_led_example` och kopiera över de Cargo specifika och VSCode specifika filerna från `gdb_test`.
+
+```bash
+cargo new button_led_example
+cd button_led_example
+cp -r ../gdb_test/.vscode ./
+cp -r ../gdb_test/.cargo ./
+cp ../gdb_test/Cargo.toml ./
+cp ../gdb_test/memory.x ./
+cp ../gdb_test/nrf52840.svd ./
+cp -r ../gdb_test/debug_openocd.cfg ./
+cp ../gdb_test/src/main.rs src/main.rs
+```
+
+Sedan lägger du till ditt target
+```bash
+rustup target add thumbv7em-none-eabi
+```
+
+Redigera `Cargo.toml` och byt namn på projektet från `gdb_test` till `button_led_example`.
+
+Testa sedan att öppna `button_led_example` i VSCode och köra `RUN AND DEBUG` (`F5`). Den bör debugga precis som den gjorde i förra exemplet.
