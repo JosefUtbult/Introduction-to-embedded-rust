@@ -1649,4 +1649,89 @@ rustup target add thumbv7em-none-eabi
 
 Redigera `Cargo.toml` och byt namn på projektet från `gdb_test` till `button_led_example`.
 
+Du behöver också lägga till ett till dependency i `Cargo.toml` för att få lite hårdvarurelaterade saker. Under `[dependencies]` kan du lägga till följande.
+```toml
+# Definitioner för hårdvaruspecifika saker såsom input och output pins mm
+embedded-hal = "0.2.7"
+```
+
 Testa sedan att öppna `button_led_example` i VSCode och köra `RUN AND DEBUG` (`F5`). Den bör debugga precis som den gjorde i förra exemplet.
+
+### Kod
+
+Nu är det dags för lite kod. Klistra in följande i `src/main.rs`
+```rust
+// Main fungerar inte riktigt på samma sätt i embedded 
+// rust, så vi måste specificera att den inte ska 
+// använda orginella main
+#![no_main]
+// Vi har heller inte standardbiblioteket för att printa
+#![no_std]
+
+// Vi importerar funktionaliteten från vår HAL
+use nrf52840_hal as hal;
+
+// Vi importerar också ett macro för att kunna printa
+use rtt_target::{rtt_init_print, rprintln};
+
+// Samt definitioner av input och output pins
+use hal::gpio::Level;
+use embedded_hal::digital::v2::{OutputPin,InputPin};
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+	// Initialisera printing
+	rtt_init_print!();
+
+	// Peripheralsobjektet är i princip ett mjukvarolager som har hand om alla 
+	// hårdvarukomponenter i processorn, så som klockor, pins osv
+	let peripherals = hal::pac::Peripherals::take().unwrap();
+
+	// Från peripheralsobjektet är vi just nu bara intresserade av ett pin register 
+	// som heter port1. Vi separerar därför ut det från peripherals till ett separat objekt
+	let port1 = hal::gpio::p1::Parts::new(peripherals.P1);
+
+	// Från port1 objektet vill vi sedan ännu en gång separera ut två pins. Den första är
+	// pin 8 som är kopplad till knappen. Vi specificerar att vi vill ha pin 8 objektet från
+	// port1, och att den pinnen ska hanteras som en "pullup_input", dvs en input med en 
+	// intern pullupresistor påkopplad
+    let button = port1.p1_08.into_pullup_input();
+
+	// Vi vill även ha tillgång till pin 1 som är kopplad till leden. Den ska dock vara en
+	// "push_pull_output", dvs en output som sätts till antingen hög eller låg (och inte
+	// tex floating)
+    let mut led = port1.p1_01.into_push_pull_output(Level::Low);
+
+	rprintln!("Blink-knapp test.");
+
+	// Vi har en loop som körs för alltid. I den använder vi funktionen is_low som är inbyggd
+	// i input pin objektet. Om is_low returnerar true vet vi att knappen är intryckt och 
+	// vi kallar på en funktion i output pin objektet för att sätta lampan till hög. Annars
+	// sätter vi den till låg
+    loop {
+		if button.is_low().unwrap() {
+			led.set_high().unwrap();
+		}
+		else {
+			led.set_low().unwrap();
+
+		}
+    }
+}
+
+// Här specificerar vi vad som ska hända när programmet kraschar 
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+	rprintln!("Panic!");
+	exit();
+}
+
+// Här har vi en exitfunktion. Den behövs för att processorn inte ska fortsätta köra
+// icke-existerande instruktioner efter vårt program
+pub fn exit() -> ! {
+	loop {
+		cortex_m::asm::bkpt();
+	}
+}
+
+```
